@@ -38,7 +38,43 @@ pub fn gemini_main(alloc: std.mem.Allocator, data: autodoc.DocData, output_dir_p
     try index.doc.addLink("https://github.com/der-teufel-programming/zirkon-docs", "Zirkon - the tool used to create this page");
 
     try index.finalize();
+    try renderSources(alloc, output_dir, src_dir_path, data.files);
+    var mods_file = try GemFile.init(alloc, "modules.gmi", output_dir);
+    defer mods_file.close();
+    try renderModules(alloc, &mods_file, data.modules);
+    try mods_file.finalize();
+}
 
+const GemFile = struct {
+    file: std.fs.File,
+    doc: render.Document,
+
+    pub fn init(alloc: std.mem.Allocator, file_path: []const u8, dir: std.fs.Dir) !GemFile {
+        var doc = render.Document.init(alloc);
+        var file = try dir.createFile(file_path, .{});
+        return .{
+            .doc = doc,
+            .file = file,
+        };
+    }
+
+    pub fn close(self: GemFile) void {
+        self.file.close();
+        self.doc.deinit();
+    }
+
+    pub fn finalize(self: *GemFile) !void {
+        try self.doc.renderTo(self.file.writer());
+        self.doc.text.clearRetainingCapacity();
+    }
+};
+
+fn renderSources(
+    alloc: std.mem.Allocator,
+    output_dir: std.fs.Dir,
+    src_dir_path: []const u8,
+    files: []const autodoc.File,
+) !void {
     var src_dir = output_dir.openDir("src", .{}) catch |err| blk: {
         switch (err) {
             error.FileNotFound => {
@@ -50,18 +86,18 @@ pub fn gemini_main(alloc: std.mem.Allocator, data: autodoc.DocData, output_dir_p
     };
     defer src_dir.close();
 
+    var raw_src_dir = try std.fs.cwd().openDir(src_dir_path, .{});
+    defer raw_src_dir.close();
+
     var src_idx = try GemFile.init(alloc, "index.gmi", src_dir);
     defer src_idx.close();
 
     try src_idx.doc.addHeading(.h1, "Sources");
 
-    var raw_src_dir = try std.fs.cwd().openDir(src_dir_path, .{});
-    defer raw_src_dir.close();
-
     var elems = std.ArrayListUnmanaged([]const u8){};
     defer elems.deinit(alloc);
 
-    for (data.files) |file| {
+    for (files) |file| {
         const gen_name = try std.fmt.allocPrint(alloc, "{s}.gmi", .{std.fs.path.basename(file.name)});
         defer alloc.free(gen_name);
 
@@ -104,26 +140,10 @@ pub fn gemini_main(alloc: std.mem.Allocator, data: autodoc.DocData, output_dir_p
     try src_idx.finalize();
 }
 
-const GemFile = struct {
-    file: std.fs.File,
-    doc: render.Document,
-
-    pub fn init(alloc: std.mem.Allocator, file_path: []const u8, dir: std.fs.Dir) !GemFile {
-        var doc = render.Document.init(alloc);
-        var file = try dir.createFile(file_path, .{});
-        return .{
-            .doc = doc,
-            .file = file,
-        };
+fn renderModules(alloc: std.mem.Allocator, modules_file: *GemFile, modules: []const autodoc.Module) !void {
+    for (modules) |mod| {
+        const link = try std.fmt.allocPrint(alloc, "mods/{s}.gmi", .{mod.name});
+        defer alloc.free(link);
+        try modules_file.doc.addLink(link, mod.name);
     }
-
-    pub fn close(self: GemFile) void {
-        self.file.close();
-        self.doc.deinit();
-    }
-
-    pub fn finalize(self: *GemFile) !void {
-        try self.doc.renderTo(self.file.writer());
-        self.doc.text.clearRetainingCapacity();
-    }
-};
+}
