@@ -1,33 +1,59 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub fn parseDocs(reader: anytype, alloc: Allocator) !std.json.Parsed(DocData) {
-    var json = std.json.reader(alloc, reader);
-    defer json.deinit();
+pub fn parseDocs(data_dir_path: []const u8, alloc: Allocator) !std.json.Parsed(DocData) {
+    var data_dir = std.fs.cwd().openDir(data_dir_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => {
+            std.debug.print("FileNotFound: {s}\n", .{data_dir_path});
+            return err;
+        },
+        else => return err,
+    };
+    defer data_dir.close();
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer {
         // std.log.debug("Size used in arena: {}", .{std.fmt.fmtIntSizeDec(arena.queryCapacity())});
         arena.deinit();
     }
-    const raw_data = try std.json.Value.jsonParse(arena.allocator(), &json, .{});
 
-    return std.json.parseFromValue(DocData, alloc, raw_data, .{});
+    var data: DocData = undefined;
+    var data_arena = try alloc.create(std.heap.ArenaAllocator);
+    data_arena.* = std.heap.ArenaAllocator.init(alloc);
+
+    inline for (std.meta.fields(DocData)) |f| {
+        const field_name = f.name;
+        const file_name = "data-" ++ field_name ++ ".js";
+        const data_js_f = data_dir.openFile(file_name, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                std.debug.print("FileNotFound: {s}\n", .{file_name});
+                return err;
+            },
+            else => return err,
+        };
+        defer data_js_f.close();
+
+        var buffer = std.io.bufferedReader(data_js_f.reader());
+        const reader = buffer.reader();
+
+        try reader.skipUntilDelimiterOrEof('=');
+
+        var json = std.json.reader(alloc, reader);
+        defer json.deinit();
+        const raw_data = try std.json.Value.jsonParse(arena.allocator(), &json, .{ .max_value_len = std.math.maxInt(u32) });
+
+        @field(data, field_name) = try std.json.parseFromValueLeaky(f.type, data_arena.allocator(), raw_data, .{});
+    }
+
+    return .{
+        .value = data,
+        .arena = data_arena,
+    };
 }
 
 pub const DocData = struct {
     typeKinds: []const []const u8,
     rootMod: u32,
-    params: struct {
-        zigId: []const u8,
-        zigVersion: []const u8,
-        target: []const u8,
-        builds: []const struct {
-            target: []const u8,
-        },
-    },
     modules: []const Module,
-    // not correct but this array isn't populated in Autodoc
-    errors: []const u8,
     astNodes: []const AstNode,
     files: []const File,
     calls: []const Call,
@@ -35,7 +61,7 @@ pub const DocData = struct {
     exprs: []const Expr,
     comptimeExprs: []const ComptimeExpr,
     decls: []const Decl,
-    guide_sections: []const Section,
+    guideSections: []const Section,
 
     pub fn prettyPrint(self: DocData, value: anytype, writer: anytype) !void {
         try value.prettyPrint(self, writer);
@@ -48,7 +74,11 @@ pub const Module = struct {
     main: usize,
     table: std.StringArrayHashMapUnmanaged(usize),
 
-    pub fn jsonParseFromValue(alloc: Allocator, value: std.json.Value, options: std.json.ParseOptions) !Module {
+    pub fn jsonParseFromValue(
+        alloc: Allocator,
+        value: std.json.Value,
+        options: std.json.ParseOptions,
+    ) !Module {
         _ = options;
 
         const module_value = value.object;
@@ -65,7 +95,11 @@ pub const Module = struct {
         };
     }
 
-    fn parseTable(value: std.json.Value, table: *std.StringArrayHashMapUnmanaged(usize), alloc: Allocator) !void {
+    fn parseTable(
+        value: std.json.Value,
+        table: *std.StringArrayHashMapUnmanaged(usize),
+        alloc: Allocator,
+    ) !void {
         const table_value = value.object;
         var it = table_value.iterator();
         while (it.next()) |entry| {
@@ -74,22 +108,39 @@ pub const Module = struct {
         }
     }
 
-    pub fn format(value: Module, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: Module,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         _ = options;
         _ = fmt;
-        try writer.print("{{ name: `{s}`, file: {}, main: {}, table: {{ ", .{ value.name, value.file, value.main });
+        try writer.print(
+            "{{ name: `{s}`, file: {}, main: {}, table: {{ ",
+            .{ value.name, value.file, value.main },
+        );
         var it = value.table.iterator();
         while (it.next()) |entry| {
-            try writer.print("{s}: {}, ", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try writer.print(
+                "{s}: {}, ",
+                .{ entry.key_ptr.*, entry.value_ptr.* },
+            );
         }
         try writer.writeAll("} }");
     }
 
     pub fn prettyPrint(value: Module, data: DocData, writer: anytype) !void {
-        try writer.print("name: {s}\nfile: {s}\ntable:\n", .{ value.name, data.files[value.file].name });
+        try writer.print(
+            "name: {s}\nfile: {s}\ntable:\n",
+            .{ value.name, data.files[value.file].name },
+        );
         var it = value.table.iterator();
         while (it.next()) |entry| {
-            try writer.print(" - {s}: {}\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            try writer.print(
+                " - {s}: {}\n",
+                .{ entry.key_ptr.*, entry.value_ptr.* },
+            );
         }
     }
 };
@@ -104,16 +155,30 @@ pub const AstNode = struct {
     fields: ?[]usize = null,
     @"comptime": bool = false,
 
-    pub fn jsonParseFromValue(alloc: Allocator, value: std.json.Value, options: std.json.ParseOptions) !AstNode {
+    pub fn jsonParseFromValue(
+        alloc: Allocator,
+        value: std.json.Value,
+        options: std.json.ParseOptions,
+    ) !AstNode {
         const array = value.array.items;
         var node: AstNode = undefined;
         inline for (@typeInfo(AstNode).Struct.fields, 0..) |field, idx| {
-            @field(node, field.name) = try std.json.parseFromValueLeaky(field.type, alloc, array[idx], options);
+            @field(node, field.name) = try std.json.parseFromValueLeaky(
+                field.type,
+                alloc,
+                array[idx],
+                options,
+            );
         }
         return node;
     }
 
-    pub fn format(value: AstNode, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: AstNode,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         _ = options;
         _ = fmt;
         try writer.print("{{ {}:{}:{}, ", .{ value.file, value.line, value.col });
@@ -137,7 +202,11 @@ pub const File = struct {
     name: []const u8,
     main_type: usize,
 
-    pub fn jsonParseFromValue(alloc: Allocator, value: std.json.Value, options: std.json.ParseOptions) !File {
+    pub fn jsonParseFromValue(
+        alloc: Allocator,
+        value: std.json.Value,
+        options: std.json.ParseOptions,
+    ) !File {
         _ = options;
         const name = try alloc.dupe(u8, value.array.items[0].string);
         const idx: usize = @intCast(value.array.items[1].integer);
@@ -146,10 +215,18 @@ pub const File = struct {
             .main_type = idx,
         };
     }
-    pub fn format(value: File, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: File,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         _ = options;
         _ = fmt;
-        try writer.print("{{ name: '{s}', main_type: {}}}", .{ value.name, value.main_type });
+        try writer.print(
+            "{{ name: '{s}', main_type: {}}}",
+            .{ value.name, value.main_type },
+        );
     }
 };
 
@@ -158,10 +235,18 @@ pub const Call = struct {
     args: []const Expr,
     ret: Expr,
 
-    pub fn format(value: Call, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: Call,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         _ = options;
         _ = fmt;
-        try writer.print("{}({any}) -> {}", .{ value.func, value.args, value.ret });
+        try writer.print(
+            "{}({any}) -> {}",
+            .{ value.func, value.args, value.ret },
+        );
     }
 };
 
@@ -198,10 +283,10 @@ pub const Type = union(enum) {
     Struct: struct {
         name: []const u8,
         src: usize, // index into astNodes
-        privDecls: []usize, // index into decls
-        pubDecls: []usize, // index into decls
-        field_types: []Expr, // (use src->fields to find names)
-        field_defaults: []?Expr, // default values is specified
+        privDecls: []const usize, // index into decls
+        pubDecls: []const usize, // index into decls
+        field_types: []const Expr, // (use src->fields to find names)
+        field_defaults: []const ?Expr, // default values is specified
         backing_int: ?Expr, // backing integer if specified
         is_tuple: bool,
         line_number: usize,
@@ -227,20 +312,20 @@ pub const Type = union(enum) {
     Enum: struct {
         name: []const u8,
         src: usize, // index into astNodes
-        privDecls: []usize, // index into decls
-        pubDecls: []usize, // index into decls
+        privDecls: []const usize, // index into decls
+        pubDecls: []const usize, // index into decls
         // (use src->fields to find field names)
         tag: ?Expr, // tag type if specified
-        values: []?Expr, // tag values if specified
+        values: []const ?Expr, // tag values if specified
         nonexhaustive: bool,
         parent_container: ?usize, // index into `types`
     },
     Union: struct {
         name: []const u8,
         src: usize, // index into astNodes
-        privDecls: []usize, // index into decls
-        pubDecls: []usize, // index into decls
-        fields: []Expr, // (use src->fields to find names)
+        privDecls: []const usize, // index into decls
+        pubDecls: []const usize, // index into decls
+        fields: []const Expr, // (use src->fields to find names)
         tag: ?Expr, // tag type if specified
         auto_enum: bool, // tag is an auto enum
         parent_container: ?usize, // index into `types`
@@ -251,7 +336,7 @@ pub const Type = union(enum) {
         src: ?usize, // index into `astNodes`
         ret: Expr,
         generic_ret: ?Expr,
-        params: ?[]Expr, // (use src->fields to find names)
+        params: ?[]const Expr, // (use src->fields to find names)
         lib_name: []const u8,
         is_var_args: bool,
         is_inferred_error: bool,
@@ -266,8 +351,8 @@ pub const Type = union(enum) {
     Opaque: struct {
         name: []const u8,
         src: usize, // index into astNodes
-        privDecls: []usize, // index into decls
-        pubDecls: []usize, // index into decls
+        privDecls: []const usize, // index into decls
+        pubDecls: []const usize, // index into decls
         parent_container: ?usize, // index into `types`
     },
     Frame: struct { name: []const u8 },
@@ -278,25 +363,48 @@ pub const Type = union(enum) {
     const Field = struct {
         name: []const u8,
         docs: []const u8,
-        pub fn format(value: Field, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(
+            value: Field,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
             _ = options;
             _ = fmt;
             try writer.print(".{s}", .{value.name});
         }
     };
 
-    pub fn jsonParseFromValue(alloc: Allocator, value: std.json.Value, options: std.json.ParseOptions) !Type {
+    pub fn jsonParseFromValue(
+        alloc: Allocator,
+        value: std.json.Value,
+        options: std.json.ParseOptions,
+    ) !Type {
         const array = value.array.items;
         const typeKind: std.meta.Tag(Type) = @enumFromInt(array[0].integer);
-        return parseUnionFromSlice(alloc, Type, @tagName(typeKind), array[1..], options);
+        return parseUnionFromSlice(
+            alloc,
+            Type,
+            @tagName(typeKind),
+            array[1..],
+            options,
+        );
     }
 
-    pub fn format(value: Type, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: Type,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
         _ = options;
-        std.debug.print("\n\t`{s}`\n", .{fmt});
         switch (value) {
             .Type => |v| try writer.print("{s} (type)", .{v.name}),
-            .ComptimeExpr => |v| try writer.print("{s} (ComptimeExpr)", .{v.name}),
+            .ComptimeExpr => |v| try writer.print(
+                "{s} (ComptimeExpr)",
+                .{v.name},
+            ),
             .Void => try writer.writeAll("void"),
             .Bool => try writer.writeAll("bool"),
             .NoReturn => try writer.writeAll("noreturn"),
@@ -351,9 +459,18 @@ pub const Type = union(enum) {
                 if (p.has_align) try writer.print("align({}) ", .{p.@"align".?});
                 try writer.print("{}", .{p.child});
             },
-            .Optional => |opt| try writer.print("?{} ({s})", .{ opt.child, opt.name }),
-            .ErrorUnion => |eu| try writer.print("({})!({})", .{ eu.lhs, eu.rhs }),
-            .ErrorSet => |es| try writer.print("error {{{?any}}} ({s})", .{ es.fields, es.name }),
+            .Optional => |opt| try writer.print(
+                "?{} ({s})",
+                .{ opt.child, opt.name },
+            ),
+            .ErrorUnion => |eu| try writer.print(
+                "({})!({})",
+                .{ eu.lhs, eu.rhs },
+            ),
+            .ErrorSet => |es| try writer.print(
+                "error {{{?any}}} ({s})",
+                .{ es.fields, es.name },
+            ),
             .Struct => |s| {
                 try writer.writeAll("struct { fields: { ");
                 for (s.field_types, s.field_defaults) |ft, fdef| {
@@ -376,13 +493,23 @@ pub const Type = union(enum) {
                 }
             },
             .Fn => |func| {
-                try writer.print("Fn({s}){{ args: {any} }}", .{ func.name, func.params orelse &.{} });
+                try writer.print(
+                    "Fn({s}){{ args: {any} }}",
+                    .{ func.name, func.params orelse &[_]Expr{} },
+                );
             },
-            inline else => |v| try writer.print("{} ({s})", .{ v, @tagName(value) }),
+            inline else => |v| try writer.print(
+                "{} ({s})",
+                .{ v, @tagName(value) },
+            ),
         }
     }
 
-    pub fn prettyPrint(value: Type, data: DocData, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn prettyPrint(
+        value: Type,
+        data: DocData,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
         switch (value) {
             .Type => |v| try writer.print("{s} (type)", .{v.name}),
             .ComptimeExpr => |v| try writer.print("{s} (ComptimeExpr)", .{v.name}),
@@ -453,7 +580,10 @@ pub const Type = union(enum) {
                 try writer.writeAll("!");
                 try ieu.payload.prettyPrint(data, writer);
             },
-            .ErrorSet => |es| try writer.print("error {{{?any}}} ({s})", .{ es.fields, es.name }),
+            .ErrorSet => |es| try writer.print(
+                "error {{{?any}}} ({s})",
+                .{ es.fields, es.name },
+            ),
             .Struct => |s| {
                 try writer.writeAll("struct {\n");
                 const ast = data.astNodes[s.src];
@@ -485,7 +615,10 @@ pub const Type = union(enum) {
                     const args = ast.fields orelse &.{};
                     const params = func.params orelse &.{};
                     for (args, params) |arg, param| {
-                        try writer.print("    {s}: ", .{data.astNodes[arg].name orelse ""});
+                        try writer.print(
+                            "    {s}: ",
+                            .{data.astNodes[arg].name orelse ""},
+                        );
                         try param.prettyPrint(data, writer);
                         try writer.writeAll(",\n");
                     }
@@ -501,7 +634,10 @@ pub const Type = union(enum) {
                 try func.ret.prettyPrint(data, writer);
             },
 
-            inline else => |v| try writer.print("{} ({s})", .{ v, @tagName(value) }),
+            inline else => |v| try writer.print(
+                "{} ({s})",
+                .{ v, @tagName(value) },
+            ),
         }
     }
 };
@@ -516,11 +652,20 @@ pub const Decl = struct {
     is_uns: bool, // usingnamespace
     parent_container: ?usize, // index into `types`
 
-    pub fn jsonParseFromValue(alloc: Allocator, value: std.json.Value, options: std.json.ParseOptions) !Decl {
+    pub fn jsonParseFromValue(
+        alloc: Allocator,
+        value: std.json.Value,
+        options: std.json.ParseOptions,
+    ) !Decl {
         return parseStructFromSlice(alloc, Decl, value.array.items, options);
     }
 
-    pub fn format(value: Decl, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: Decl,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         _ = options;
         _ = fmt;
         try writer.print(
@@ -553,17 +698,18 @@ pub const Expr = union(enum) {
     @"unreachable": struct {},
     null: struct {},
     undefined: struct {},
-    @"struct": []FieldVal,
+    @"struct": []const FieldVal,
     bool: bool,
     @"anytype": struct {},
     @"&": usize, // index in `exprs`
     type: usize, // index in `types`
     this: usize, // index in `types`
     declRef: usize,
+    declIndex: usize, // same as above
     declName: []const u8, // unresolved decl name
     builtinField: enum { len, ptr },
     fieldRef: FieldRef,
-    refPath: []Expr,
+    refPath: []const Expr,
     int: i65,
     int_big: struct {
         value: []const u8, // string representation
@@ -571,18 +717,15 @@ pub const Expr = union(enum) {
     },
     float: f64, // direct value
     float128: f128, // direct value
-    array: []usize, // index in `exprs`
+    array: []const usize, // index in `exprs`
     call: usize, // index in `calls`
     enumLiteral: []const u8, // direct value
-    alignOf: usize, // index in `exprs`
     typeOf: usize, // index in `exprs`
-    typeInfo: usize, // index in `exprs`
-    typeOf_peer: []usize,
+    typeOf_peer: []const usize,
     errorUnion: usize, // index in `types`
     as: As,
     sizeOf: usize, // index in `exprs`
     bitSizeOf: usize, // index in `exprs`
-    intFromEnum: usize, // index in `exprs`
     compileError: usize, //index in `exprs`
     optionalPayload: usize, // index in `exprs`
     elemVal: ElemVal,
@@ -597,12 +740,21 @@ pub const Expr = union(enum) {
     builtinIndex: usize,
     builtinBin: BuiltinBin,
     builtinBinIndex: usize,
+    unionInit: UnionInit,
+    builtinCall: BuiltinCall,
+    mulAdd: MulAdd,
     switchIndex: usize, // index in `exprs`
     switchOp: SwitchOp,
+    unOp: UnOp,
+    unOpIndex: usize,
     binOp: BinOp,
     binOpIndex: usize,
     load: usize, // index in `exprs`
-    ref: usize, // index in `exprs`
+
+    const UnOp = struct {
+        param: usize, // index in `exprs`
+        name: []const u8 = "", // tag name
+    };
     const BinOp = struct {
         lhs: usize, // index in `exprs`
         rhs: usize, // index in `exprs`
@@ -622,6 +774,22 @@ pub const Expr = union(enum) {
     const Builtin = struct {
         name: []const u8 = "", // fn name
         param: usize, // index in `exprs`
+    };
+    const BuiltinCall = struct {
+        modifier: usize, // index in `exprs`
+        function: usize, // index in `exprs`
+        args: usize, // index in `exprs`
+    };
+    const MulAdd = struct {
+        mulend1: usize, // index in `exprs`
+        mulend2: usize, // index in `exprs`
+        addend: usize, // index in `exprs`
+        type: usize, // index in `exprs`
+    };
+    const UnionInit = struct {
+        type: usize, // index in `exprs`
+        field: usize, // index in `exprs`
+        init: usize, // index in `exprs`
     };
     const Slice = struct {
         lhs: usize, // index in `exprs`
@@ -656,10 +824,18 @@ pub const Expr = union(enum) {
     const FieldVal = struct {
         name: []const u8,
         val: WalkResult,
-        pub fn format(fv: FieldVal, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        pub fn format(
+            fv: FieldVal,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
             _ = options;
             _ = fmt;
-            try writer.print("(.{s} = ({?}){}", .{ fv.name, fv.val.typeRef, fv.val.expr });
+            try writer.print(
+                "(.{s} = ({?}){}",
+                .{ fv.name, fv.val.typeRef, fv.val.expr },
+            );
         }
     };
     const ElemVal = struct {
@@ -667,7 +843,12 @@ pub const Expr = union(enum) {
         rhs: usize, // index in `exprs`
     };
 
-    pub fn format(value: Expr, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(
+        value: Expr,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
         _ = fmt;
         _ = options;
         switch (value) {
@@ -678,18 +859,32 @@ pub const Expr = union(enum) {
             .enumLiteral => |el| try writer.print(".{s}", .{el}),
             .builtin => |bt| try writer.print("@{s}(%{})", .{ bt.name, bt.param }),
             .builtinIndex => |bti| try writer.print("Builtin(%{})", .{bti}),
-            .builtinBinIndex => |btbi| try writer.print("BuiltinBin(%{})", .{btbi}),
-            .binOp => |bin| try writer.print("{s}(%{}, %{})", .{ bin.name, bin.lhs, bin.rhs }),
-            .builtinBin => |bbin| try writer.print("@{s}(%{}, %{})", .{ bbin.name, bbin.lhs, bbin.rhs }),
+            .builtinBinIndex => |btbi| try writer.print(
+                "BuiltinBin(%{})",
+                .{btbi},
+            ),
+            .binOp => |bin| try writer.print(
+                "{s}(%{}, %{})",
+                .{ bin.name, bin.lhs, bin.rhs },
+            ),
+            .builtinBin => |bbin| try writer.print(
+                "@{s}(%{}, %{})",
+                .{ bbin.name, bbin.lhs, bbin.rhs },
+            ),
             .binOpIndex => |bin_idx| try writer.print("BinOp(%{})", .{bin_idx}),
-            .as => |as| try writer.print("as(%{?}, %{})", .{ as.typeRefArg, as.exprArg }),
+            .as => |as| try writer.print(
+                "as(%{?}, %{})",
+                .{ as.typeRefArg, as.exprArg },
+            ),
             .type => |t| try writer.print("type(%{})", .{t}),
             .typeOf => |to| try writer.print("@TypeOf(%{})", .{to}),
-            .typeInfo => |ti| try writer.print("@typeInfo(%{})", .{ti}),
             .comptimeExpr => |cte| try writer.print("cte(%{})", .{cte}),
             .declRef => |dref| try writer.print("decl(%{})", .{dref}),
             .call => |call| try writer.print("call(%{})", .{call}),
-            .fieldRef => |fref| try writer.print("field(%{}, %{})", .{ fref.type, fref.index }),
+            .fieldRef => |fref| try writer.print(
+                "field(%{}, %{})",
+                .{ fref.type, fref.index },
+            ),
             .declName => |name| try writer.writeAll(name),
             .@"struct" => |st| {
                 if (st.len == 0) {
@@ -708,11 +903,18 @@ pub const Expr = union(enum) {
                     try writer.print(".{}", .{ref});
                 }
             },
-            inline else => |v| try writer.print("{{ Expr.{s} = {any} }}", .{ @tagName(value), v }),
+            inline else => |v| try writer.print(
+                "{{ Expr.{s} = {any} }}",
+                .{ @tagName(value), v },
+            ),
         }
     }
 
-    pub fn prettyPrint(value: Expr, data: DocData, writer: anytype) @TypeOf(writer).Error!void {
+    pub fn prettyPrint(
+        value: Expr,
+        data: DocData,
+        writer: anytype,
+    ) @TypeOf(writer).Error!void {
         switch (value) {
             .undefined => try writer.writeAll("undefined"),
             .null => try writer.writeAll("null"),
@@ -823,7 +1025,11 @@ const SearchRes = struct {
     idx: usize,
 };
 
-fn searchComptimeExprs(data: DocData, term: []const u8, alloc: Allocator) ![]const SearchRes {
+fn searchComptimeExprs(
+    data: DocData,
+    term: []const u8,
+    alloc: Allocator,
+) ![]const SearchRes {
     var list = std.ArrayList(SearchRes).init(alloc);
     for (data.comptimeExprs, 0..) |cte, idx| {
         if (std.mem.containsAtLeast(u8, cte.code, 1, term)) {
@@ -835,12 +1041,17 @@ fn searchComptimeExprs(data: DocData, term: []const u8, alloc: Allocator) ![]con
     }
     return list.toOwnedSlice();
 }
+
 const SearchExpr = struct {
     data: Expr,
     idx: usize,
 };
 
-fn searchExprs(data: DocData, terms: []const SearchRes, alloc: Allocator) ![]const SearchExpr {
+fn searchExprs(
+    data: DocData,
+    terms: []const SearchRes,
+    alloc: Allocator,
+) ![]const SearchExpr {
     var list = std.ArrayList(SearchExpr).init(alloc);
     for (data.exprs, 0..) |exp, idx| {
         for (terms) |t| {
@@ -853,4 +1064,27 @@ fn searchExprs(data: DocData, terms: []const SearchRes, alloc: Allocator) ![]con
         }
     }
     return list.toOwnedSlice();
+}
+
+test {
+    const zig = @import("zig");
+    const expr_kinds_exp_raw = std.meta.fieldNames(zig.DocData.Expr);
+    const expr_kinds_raw = std.meta.fieldNames(Expr);
+    var expr_kinds_exp = try std.testing.allocator.dupe([]const u8, expr_kinds_exp_raw);
+    defer std.testing.allocator.free(expr_kinds_exp);
+    var expr_kinds = try std.testing.allocator.dupe([]const u8, expr_kinds_raw);
+    defer std.testing.allocator.free(expr_kinds);
+    std.mem.sort([]const u8, expr_kinds_exp, {}, orderStrings);
+    std.mem.sort([]const u8, expr_kinds, {}, orderStrings);
+    for (expr_kinds_exp, expr_kinds) |exp, val| {
+        if (!std.mem.eql(u8, exp, val)) {
+            std.debug.print("Not equal: '{s}' '{s}'\n", .{ exp, val });
+        } else {
+            std.debug.print("Yes equal: '{s}' '{s}'\n", .{ exp, val });
+        }
+    }
+}
+
+fn orderStrings(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
 }

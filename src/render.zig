@@ -2,10 +2,6 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
-pub fn create(alloc: Allocator) !void {
-    _ = alloc;
-}
-
 pub const Document = struct {
     text: std.ArrayList(u8),
 
@@ -30,10 +26,18 @@ pub const Document = struct {
 
     pub fn addText(self: *Document, text: []const u8) !void {
         try self.text.appendSlice(text);
-        if (text[text.len - 1] != '\n') try self.text.append('\n');
+        if (text.len > 0) {
+            if (text[text.len - 1] != '\n') try self.text.append('\n');
+        } else {
+            try self.text.append('\n');
+        }
     }
 
-    pub fn addLink(self: *Document, link: []const u8, name: ?[]const u8) !void {
+    pub fn addLink(
+        self: *Document,
+        link: []const u8,
+        name: ?[]const u8,
+    ) !void {
         try self.text.writer().print("=> {s}", .{link});
         if (name) |label| {
             try self.text.writer().print(" {s}", .{label});
@@ -42,7 +46,11 @@ pub const Document = struct {
     }
 
     pub const Heading = enum { h1, h2, h3 };
-    pub fn addHeading(self: *Document, level: Heading, text: []const u8) !void {
+    pub fn addHeading(
+        self: *Document,
+        level: Heading,
+        text: []const u8,
+    ) !void {
         switch (level) {
             .h1 => try self.text.append('#'),
             .h2 => try self.text.appendNTimes('#', 2),
@@ -51,7 +59,10 @@ pub const Document = struct {
         try self.text.writer().print(" {s}\n", .{text});
     }
 
-    pub fn addList(self: *Document, items: []const []const u8) !void {
+    pub fn addList(
+        self: *Document,
+        items: []const []const u8,
+    ) !void {
         for (items) |item| {
             self.text.writer().print("* {s}\n", .{item});
         }
@@ -61,7 +72,11 @@ pub const Document = struct {
         try self.text.writer().print("> {s}\n", .{text});
     }
 
-    pub fn addPreformatted(self: *Document, raw: []const u8, alt: ?[]const u8) !void {
+    pub fn addPreformatted(
+        self: *Document,
+        raw: []const u8,
+        alt: ?[]const u8,
+    ) !void {
         try self.text.appendSlice("```");
         if (alt) |alt_text| {
             try self.text.appendSlice(alt_text);
@@ -72,7 +87,11 @@ pub const Document = struct {
         try self.text.appendSlice("```\n");
     }
 
-    pub fn addPreformattedLines(self: *Document, lines: []const []const u8, alt: ?[]const u8) !void {
+    pub fn addPreformattedLines(
+        self: *Document,
+        lines: []const []const u8,
+        alt: ?[]const u8,
+    ) !void {
         try self.text.appendSlice("```");
         if (alt) |alt_text| {
             try self.text.appendSlice(alt_text);
