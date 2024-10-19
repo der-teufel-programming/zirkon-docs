@@ -84,11 +84,9 @@ const GemFile = struct {
         file_path: []const u8,
         dir: std.fs.Dir,
     ) !GemFile {
-        var doc = render.Document.init(alloc);
-        var file = try dir.createFile(file_path, .{});
         return .{
-            .doc = doc,
-            .file = file,
+            .doc = render.Document.init(alloc),
+            .file = try dir.createFile(file_path, .{}),
         };
     }
 
@@ -176,7 +174,7 @@ fn renderSources(
         defer f.close();
 
         var buff = std.io.bufferedReader(f.reader());
-        var reader = buff.reader();
+        const reader = buff.reader();
         var r = render.ZigRender.init(alloc, true);
         defer r.deinit();
 

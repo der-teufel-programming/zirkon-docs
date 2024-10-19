@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
+    const no_llvm = b.option(bool, "no-llvm", "Don't use LLVM backend to build the project") orelse false;
+    exe.use_llvm = !no_llvm;
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

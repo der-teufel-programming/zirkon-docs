@@ -1070,9 +1070,9 @@ test {
     const zig = @import("zig");
     const expr_kinds_exp_raw = std.meta.fieldNames(zig.DocData.Expr);
     const expr_kinds_raw = std.meta.fieldNames(Expr);
-    var expr_kinds_exp = try std.testing.allocator.dupe([]const u8, expr_kinds_exp_raw);
+    const expr_kinds_exp = try std.testing.allocator.dupe([]const u8, expr_kinds_exp_raw);
     defer std.testing.allocator.free(expr_kinds_exp);
-    var expr_kinds = try std.testing.allocator.dupe([]const u8, expr_kinds_raw);
+    const expr_kinds = try std.testing.allocator.dupe([]const u8, expr_kinds_raw);
     defer std.testing.allocator.free(expr_kinds);
     std.mem.sort([]const u8, expr_kinds_exp, {}, orderStrings);
     std.mem.sort([]const u8, expr_kinds, {}, orderStrings);
